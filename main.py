@@ -1,17 +1,15 @@
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-app = FastAPI()
+app = FastAPI(title="InSightEd Analysis Server")
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-
-# ---------- DATA MODELS ----------
 
 class ResponseItem(BaseModel):
     participantId: Optional[str] = ""
@@ -20,8 +18,6 @@ class ResponseItem(BaseModel):
     responseText: str
     timestamp: Optional[str] = None
 
-
-# ---------- UTILITIES ----------
 
 def compute_metrics(responses):
 
@@ -66,8 +62,6 @@ def compute_metrics(responses):
     }
 
 
-# ---------- ROOT ----------
-
 @app.get("/")
 def root():
     return {
@@ -76,15 +70,13 @@ def root():
     }
 
 
-# ---------- ANALYSIS ENDPOINT ----------
-
 @app.post("/analyze-semantic")
 async def analyze_semantic(request: Request):
 
     payload = await request.json()
-    analysis_type = payload.get("analysisType")
 
-    # ---------- SINGLE SESSION ----------
+    # If Wix does not send analysisType yet, treat it as a single-session analysis.
+    analysis_type = payload.get("analysisType", "single_session")
 
     if analysis_type == "single_session":
 
@@ -110,8 +102,6 @@ async def analyze_semantic(request: Request):
             "metrics": metrics,
             "receivedAt": datetime.now().isoformat()
         }
-
-    # ---------- SESSION COMPARISON ----------
 
     elif analysis_type == "session_comparison":
 
@@ -162,7 +152,6 @@ async def analyze_semantic(request: Request):
         return {
             "success": True,
             "analysisType": "session_comparison",
-
             "summary":
                 f"Compared Session {setA.get('sessionId')} "
                 f"to Session {setB.get('sessionId')}. "
@@ -170,35 +159,28 @@ async def analyze_semantic(request: Request):
                 f"({coherence_direction}). "
                 f"Homogeneity shift: {pairwise_change} "
                 f"({homogeneity_direction}).",
-
             "comparison": {
                 "sessionA": {
                     "sessionId": setA.get("sessionId"),
                     "metrics": metricsA
                 },
-
                 "sessionB": {
                     "sessionId": setB.get("sessionId"),
                     "metrics": metricsB
                 },
-
                 "changes": {
                     "coherence": {
                         "rawChange": coherence_change,
                         "direction": coherence_direction
                     },
-
                     "homogeneity": {
                         "rawChange": pairwise_change,
                         "direction": homogeneity_direction
                     }
                 }
             },
-
             "receivedAt": datetime.now().isoformat()
         }
-
-    # ---------- UNKNOWN ----------
 
     return {
         "success": False,

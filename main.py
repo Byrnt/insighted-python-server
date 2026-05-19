@@ -1,15 +1,19 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
-import math
-import re
-from collections import Counter
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-app = FastAPI(title="InSightEd Analysis Server")
+app = FastAPI()
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
-class SemanticResponse(BaseModel):
+# ---------- DATA MODELS ----------
+
+class ResponseItem(BaseModel):
     participantId: Optional[str] = ""
     organizationName: Optional[str] = ""
     focusConcept: Optional[str] = ""
@@ -17,12 +21,52 @@ class SemanticResponse(BaseModel):
     timestamp: Optional[str] = None
 
 
-class SemanticPayload(BaseModel):
-    sessionId: str
-    responseCount: int
-    createdAt: Optional[str] = None
-    responses: List[SemanticResponse]
+# ---------- UTILITIES ----------
 
+def compute_metrics(responses):
+
+    texts = [
+        r.responseText
+        for r in responses
+        if r.responseText and r.responseText.strip() != ""
+    ]
+
+    if len(texts) < 2:
+        return {
+            "responseCount": len(texts),
+            "centroidTightness": 0,
+            "meanPairwiseDistance": 0
+        }
+
+    embeddings = model.encode(texts)
+
+    centroid = np.mean(embeddings, axis=0)
+
+    centroid_distances = [
+        np.linalg.norm(vec - centroid)
+        for vec in embeddings
+    ]
+
+    centroid_tightness = float(np.mean(centroid_distances))
+
+    similarity_matrix = cosine_similarity(embeddings)
+
+    pairwise_distances = []
+
+    for i in range(len(similarity_matrix)):
+        for j in range(i + 1, len(similarity_matrix)):
+            pairwise_distances.append(1 - similarity_matrix[i][j])
+
+    mean_pairwise_distance = float(np.mean(pairwise_distances))
+
+    return {
+        "responseCount": len(texts),
+        "centroidTightness": round(centroid_tightness, 3),
+        "meanPairwiseDistance": round(mean_pairwise_distance, 3)
+    }
+
+
+# ---------- ROOT ----------
 
 @app.get("/")
 def root():
@@ -32,133 +76,132 @@ def root():
     }
 
 
-def clean_text(text: str) -> List[str]:
-    text = (text or "").lower()
-    text = re.sub(r"[^a-z0-9\s']", " ", text)
-    tokens = text.split()
-
-    stopwords = {
-        "the", "a", "an", "and", "or", "but", "if", "then", "to", "of", "in",
-        "on", "for", "with", "as", "is", "are", "was", "were", "be", "being",
-        "been", "it", "this", "that", "these", "those", "i", "we", "you",
-        "they", "he", "she", "them", "his", "her", "their", "our", "my",
-        "me", "us", "do", "does", "did", "so", "because", "about", "from"
-    }
-
-    return [t for t in tokens if t not in stopwords and len(t) > 1]
-
-
-def cosine_similarity(counter_a: Counter, counter_b: Counter) -> float:
-    shared = set(counter_a.keys()) & set(counter_b.keys())
-    dot = sum(counter_a[t] * counter_b[t] for t in shared)
-
-    norm_a = math.sqrt(sum(v * v for v in counter_a.values()))
-    norm_b = math.sqrt(sum(v * v for v in counter_b.values()))
-
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-
-    return dot / (norm_a * norm_b)
-
-
-def cosine_distance(counter_a: Counter, counter_b: Counter) -> float:
-    return 1.0 - cosine_similarity(counter_a, counter_b)
-
-
-def centroid_counter(counters: List[Counter]) -> Counter:
-    centroid = Counter()
-
-    if not counters:
-        return centroid
-
-    for c in counters:
-        centroid.update(c)
-
-    n = len(counters)
-
-    for key in list(centroid.keys()):
-        centroid[key] = centroid[key] / n
-
-    return centroid
-
-
-def analyze_text_set(texts: List[str]):
-    token_lists = [clean_text(t) for t in texts]
-    counters = [Counter(tokens) for tokens in token_lists]
-
-    n = len(counters)
-
-    pairwise_distances = []
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            pairwise_distances.append(
-                cosine_distance(counters[i], counters[j])
-            )
-
-    offdiag_mean = (
-        sum(pairwise_distances) / len(pairwise_distances)
-        if pairwise_distances else None
-    )
-
-    centroid = centroid_counter(counters)
-
-    centroid_distances = [
-        cosine_distance(c, centroid)
-        for c in counters
-    ]
-
-    centroid_tightness = (
-        sum(centroid_distances) / len(centroid_distances)
-        if centroid_distances else None
-    )
-
-    all_tokens = [token for tokens in token_lists for token in tokens]
-    top_terms = Counter(all_tokens).most_common(15)
-
-    return {
-        "n": n,
-        "offdiagMeanDistance": offdiag_mean,
-        "centroidTightness": centroid_tightness,
-        "topTerms": [
-            {"term": term, "count": count}
-            for term, count in top_terms
-        ],
-        "responseDiagnostics": [
-            {
-                "index": i,
-                "tokenCount": len(token_lists[i]),
-                "centroidDistance": centroid_distances[i]
-                if i < len(centroid_distances) else None
-            }
-            for i in range(n)
-        ]
-    }
-
+# ---------- ANALYSIS ENDPOINT ----------
 
 @app.post("/analyze-semantic")
-def analyze_semantic(payload: SemanticPayload):
-    texts = [
-        r.responseText
-        for r in payload.responses
-        if r.responseText and r.responseText.strip()
-    ]
+async def analyze_semantic(request: Request):
 
-    metrics = analyze_text_set(texts)
+    payload = await request.json()
+    analysis_type = payload.get("analysisType")
+
+    # ---------- SINGLE SESSION ----------
+
+    if analysis_type == "single_session":
+
+        responses = payload.get("responses", [])
+
+        metrics = compute_metrics([
+            ResponseItem(**r)
+            for r in responses
+        ])
+
+        return {
+            "success": True,
+            "analysisType": "single_session",
+            "sessionId": payload.get("sessionId"),
+            "responseCount": metrics["responseCount"],
+            "summary":
+                f"Analyzed {metrics['responseCount']} responses "
+                f"for Session {payload.get('sessionId')}. "
+                f"Centroid tightness: "
+                f"{metrics['centroidTightness']}; "
+                f"mean pairwise distance: "
+                f"{metrics['meanPairwiseDistance']}.",
+            "metrics": metrics,
+            "receivedAt": datetime.now().isoformat()
+        }
+
+    # ---------- SESSION COMPARISON ----------
+
+    elif analysis_type == "session_comparison":
+
+        setA = payload.get("setA", {})
+        setB = payload.get("setB", {})
+
+        responsesA = [
+            ResponseItem(**r)
+            for r in setA.get("responses", [])
+        ]
+
+        responsesB = [
+            ResponseItem(**r)
+            for r in setB.get("responses", [])
+        ]
+
+        metricsA = compute_metrics(responsesA)
+        metricsB = compute_metrics(responsesB)
+
+        coherence_change = round(
+            metricsB["centroidTightness"] -
+            metricsA["centroidTightness"],
+            3
+        )
+
+        pairwise_change = round(
+            metricsB["meanPairwiseDistance"] -
+            metricsA["meanPairwiseDistance"],
+            3
+        )
+
+        coherence_direction = (
+            "more coherent"
+            if coherence_change < 0
+            else "less coherent"
+            if coherence_change > 0
+            else "no change"
+        )
+
+        homogeneity_direction = (
+            "more homogeneous"
+            if pairwise_change < 0
+            else "less homogeneous"
+            if pairwise_change > 0
+            else "no change"
+        )
+
+        return {
+            "success": True,
+            "analysisType": "session_comparison",
+
+            "summary":
+                f"Compared Session {setA.get('sessionId')} "
+                f"to Session {setB.get('sessionId')}. "
+                f"Coherence shift: {coherence_change} "
+                f"({coherence_direction}). "
+                f"Homogeneity shift: {pairwise_change} "
+                f"({homogeneity_direction}).",
+
+            "comparison": {
+                "sessionA": {
+                    "sessionId": setA.get("sessionId"),
+                    "metrics": metricsA
+                },
+
+                "sessionB": {
+                    "sessionId": setB.get("sessionId"),
+                    "metrics": metricsB
+                },
+
+                "changes": {
+                    "coherence": {
+                        "rawChange": coherence_change,
+                        "direction": coherence_direction
+                    },
+
+                    "homogeneity": {
+                        "rawChange": pairwise_change,
+                        "direction": homogeneity_direction
+                    }
+                }
+            },
+
+            "receivedAt": datetime.now().isoformat()
+        }
+
+    # ---------- UNKNOWN ----------
 
     return {
-        "success": True,
-        "analysisType": "semantic_convergence_basic",
-        "sessionId": payload.sessionId,
-        "responseCount": len(texts),
-        "receivedAt": datetime.now().isoformat(),
-        "summary": (
-            f"Analyzed {len(texts)} responses for Session {payload.sessionId}. "
-            f"Centroid tightness: {metrics['centroidTightness']:.3f}; "
-            f"mean pairwise distance: {metrics['offdiagMeanDistance']:.3f}."
-            if metrics["centroidTightness"] is not None
-            and metrics["offdiagMeanDistance"] is not None
-            else f"Analyzed {len(texts)} responses for Session {payload.sessionId}."
-        ),
-        "metrics": metrics
+        "success": False,
+        "error": "Unknown analysisType",
+        "receivedPayloadKeys": list(payload.keys())
     }

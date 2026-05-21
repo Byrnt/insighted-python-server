@@ -8,6 +8,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
 
 app = FastAPI(title="InSightEd Analysis Server")
 
@@ -156,6 +157,78 @@ def co_occurrence_matrix(texts, top_n=12):
     }
 
 
+def discover_semantic_clusters(embeddings, texts, valid, k=5):
+    if embeddings is None or len(texts) < 2:
+        return []
+
+    n_responses = len(texts)
+    n_clusters = min(k, n_responses)
+
+    if n_clusters < 2:
+        return []
+
+    kmeans = KMeans(
+        n_clusters=n_clusters,
+        random_state=42,
+        n_init=10
+    )
+
+    labels = kmeans.fit_predict(embeddings)
+    centers = kmeans.cluster_centers_
+
+    clusters = []
+
+    for cluster_index in range(n_clusters):
+        member_indices = [
+            i for i, label in enumerate(labels)
+            if label == cluster_index
+        ]
+
+        if not member_indices:
+            continue
+
+        cluster_texts = [
+            texts[i] for i in member_indices
+        ]
+
+        cluster_embeddings = embeddings[member_indices]
+        cluster_center = centers[cluster_index]
+
+        distances = np.linalg.norm(
+            cluster_embeddings - cluster_center,
+            axis=1
+        )
+
+        nearest_order = np.argsort(distances)[:3]
+
+        representative_responses = []
+
+        for local_idx in nearest_order:
+            original_idx = member_indices[int(local_idx)]
+            response = valid[original_idx]
+
+            representative_responses.append({
+                "participantId": response.participantId,
+                "responseText": response.responseText,
+                "distanceToClusterCenter": round(float(distances[int(local_idx)]), 3)
+            })
+
+        clusters.append({
+            "clusterId": int(cluster_index + 1),
+            "responseCount": len(member_indices),
+            "percentage": round((len(member_indices) / n_responses) * 100, 1),
+            "topTerms": top_terms(cluster_texts, 10),
+            "representativeResponses": representative_responses
+        })
+
+    clusters.sort(
+        key=lambda c: c["responseCount"],
+        reverse=True
+    )
+
+    return clusters
+
+
 def compute_embeddings_and_metrics(responses):
     valid = [
         r for r in responses
@@ -179,7 +252,8 @@ def compute_embeddings_and_metrics(responses):
                 "outliers": [],
                 "averageResponseLength": response_length_stats(texts),
                 "lexicalDiversity": 0,
-                "coOccurrence": co_occurrence_matrix(texts)
+                "coOccurrence": co_occurrence_matrix(texts),
+                "semanticClusters": []
             }
         }
 
@@ -225,7 +299,13 @@ def compute_embeddings_and_metrics(responses):
         "outliers": outliers,
         "averageResponseLength": response_length_stats(texts),
         "lexicalDiversity": lexical_diversity(texts),
-        "coOccurrence": co_occurrence_matrix(texts)
+        "coOccurrence": co_occurrence_matrix(texts),
+        "semanticClusters": discover_semantic_clusters(
+            embeddings,
+            texts,
+            valid,
+            k=5
+        )
     }
 
     return {

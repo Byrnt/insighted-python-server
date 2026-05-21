@@ -236,6 +236,192 @@ def discover_semantic_clusters(embeddings, texts, valid, k=5):
     return clusters
 
 
+def theme_haldane_for_percentages(percentage_a, percentage_b):
+    p_a = (percentage_a or 0) / 100
+    p_b = (percentage_b or 0) / 100
+
+    pooled = np.sqrt(
+        ((p_a * (1 - p_a)) + (p_b * (1 - p_b))) / 2
+    )
+
+    if pooled == 0:
+        return None
+
+    return round(float((p_b - p_a) / pooled), 3)
+
+
+def cluster_status(percentage_a, percentage_b):
+    change = percentage_b - percentage_a
+
+    if percentage_a < 5 and percentage_b >= 15:
+        return "emerging"
+
+    if percentage_a >= 15 and percentage_b < 5:
+        return "declining"
+
+    if abs(change) < 10:
+        return "stable"
+
+    if change > 0:
+        return "strengthening"
+
+    return "weakening"
+
+
+def discover_global_semantic_clusters(session_a, session_b, k=5):
+    embeddings_a = session_a["embeddings"]
+    embeddings_b = session_b["embeddings"]
+
+    if embeddings_a is None or embeddings_b is None:
+        return []
+
+    texts_a = session_a["texts"]
+    texts_b = session_b["texts"]
+
+    valid_a = session_a["valid"]
+    valid_b = session_b["valid"]
+
+    if len(texts_a) == 0 or len(texts_b) == 0:
+        return []
+
+    combined_embeddings = np.vstack([embeddings_a, embeddings_b])
+    combined_texts = texts_a + texts_b
+
+    combined_valid = []
+
+    for response in valid_a:
+        combined_valid.append({
+            "session": "A",
+            "participantId": response.participantId,
+            "responseText": response.responseText
+        })
+
+    for response in valid_b:
+        combined_valid.append({
+            "session": "B",
+            "participantId": response.participantId,
+            "responseText": response.responseText
+        })
+
+    total_count = len(combined_texts)
+    n_clusters = min(k, total_count)
+
+    if n_clusters < 2:
+        return []
+
+    kmeans = KMeans(
+        n_clusters=n_clusters,
+        random_state=42,
+        n_init=10
+    )
+
+    labels = kmeans.fit_predict(combined_embeddings)
+    centers = kmeans.cluster_centers_
+
+    clusters = []
+
+    for cluster_index in range(n_clusters):
+        member_indices = [
+            i for i, label in enumerate(labels)
+            if label == cluster_index
+        ]
+
+        if not member_indices:
+            continue
+
+        member_indices_a = [
+            i for i in member_indices
+            if combined_valid[i]["session"] == "A"
+        ]
+
+        member_indices_b = [
+            i for i in member_indices
+            if combined_valid[i]["session"] == "B"
+        ]
+
+        response_count_a = len(member_indices_a)
+        response_count_b = len(member_indices_b)
+
+        percentage_a = round((response_count_a / len(texts_a)) * 100, 1)
+        percentage_b = round((response_count_b / len(texts_b)) * 100, 1)
+        percentage_change = round(percentage_b - percentage_a, 1)
+
+        cluster_texts = [
+            combined_texts[i] for i in member_indices
+        ]
+
+        cluster_embeddings = combined_embeddings[member_indices]
+        cluster_center = centers[cluster_index]
+
+        distances = np.linalg.norm(
+            cluster_embeddings - cluster_center,
+            axis=1
+        )
+
+        def representative_for_session(target_session, limit=3):
+            candidates = []
+
+            for local_idx, original_idx in enumerate(member_indices):
+                item = combined_valid[original_idx]
+
+                if item["session"] != target_session:
+                    continue
+
+                candidates.append({
+                    "participantId": item["participantId"],
+                    "responseText": item["responseText"],
+                    "distanceToClusterCenter": round(float(distances[local_idx]), 3)
+                })
+
+            candidates.sort(
+                key=lambda item: item["distanceToClusterCenter"]
+            )
+
+            return candidates[:limit]
+
+        def spread_for_session(session_indices):
+            if not session_indices:
+                return None
+
+            local_embeddings = combined_embeddings[session_indices]
+            local_distances = np.linalg.norm(
+                local_embeddings - cluster_center,
+                axis=1
+            )
+
+            return round(float(np.mean(local_distances)), 3)
+
+        spread_a = spread_for_session(member_indices_a)
+        spread_b = spread_for_session(member_indices_b)
+
+        clusters.append({
+            "clusterId": int(cluster_index + 1),
+            "responseCountA": response_count_a,
+            "percentageA": percentage_a,
+            "responseCountB": response_count_b,
+            "percentageB": percentage_b,
+            "percentageChange": percentage_change,
+            "status": cluster_status(percentage_a, percentage_b),
+            "themeHaldane": theme_haldane_for_percentages(
+                percentage_a,
+                percentage_b
+            ),
+            "topTerms": top_terms(cluster_texts, 10),
+            "representativeResponsesA": representative_for_session("A"),
+            "representativeResponsesB": representative_for_session("B"),
+            "spreadA": spread_a,
+            "spreadB": spread_b,
+            "spreadChange": safe_difference(spread_b, spread_a)
+        })
+
+    clusters.sort(
+        key=lambda c: abs(c["percentageChange"]),
+        reverse=True
+    )
+
+    return clusters
+
+
 def compute_embeddings_and_metrics(responses):
     valid = [
         r for r in responses
@@ -699,6 +885,12 @@ async def analyze_semantic(request: Request):
             haldane
         )
 
+        global_semantic_clusters = discover_global_semantic_clusters(
+            session_a,
+            session_b,
+            k=5
+        )
+
         return {
             "success": True,
             "analysisType": "session_comparison",
@@ -734,6 +926,7 @@ async def analyze_semantic(request: Request):
                     "semanticHaldane": haldane
                 },
                 "distinctiveTerms": term_comparison,
+                "globalSemanticClusters": global_semantic_clusters,
                 "embeddingMap": embedding_map(session_a, session_b),
                 "evidenceBasedInterpretation": interpretation,
                 "interpretiveWarnings": warnings

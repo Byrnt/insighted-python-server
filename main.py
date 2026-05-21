@@ -81,6 +81,13 @@ def lexical_diversity(texts):
     return round(len(set(tokens)) / len(tokens), 3)
 
 
+def safe_difference(value_b, value_a):
+    if value_a is None or value_b is None:
+        return None
+
+    return round(value_b - value_a, 3)
+
+
 def distinctive_terms(texts_a, texts_b, n=10):
     tokens_a = Counter()
     tokens_b = Counter()
@@ -486,14 +493,14 @@ def evidence_based_interpretation(
     a_terms = term_comparison.get("moreCharacteristicOfA", [])[:5]
     b_terms = term_comparison.get("moreCharacteristicOfB", [])[:5]
 
-    coherence_change = round(
-        metrics_b["centroidTightness"] - metrics_a["centroidTightness"],
-        3
+    coherence_change = safe_difference(
+        metrics_b.get("centroidTightness"),
+        metrics_a.get("centroidTightness")
     )
 
-    pairwise_change = round(
-        metrics_b["meanPairwiseDistance"] - metrics_a["meanPairwiseDistance"],
-        3
+    pairwise_change = safe_difference(
+        metrics_b.get("meanPairwiseDistance"),
+        metrics_a.get("meanPairwiseDistance")
     )
 
     lines = []
@@ -503,16 +510,20 @@ def evidence_based_interpretation(
     )
 
     lines.append(
-        f"{session_a_id} had centroid tightness {metrics_a['centroidTightness']} "
-        f"and mean pairwise distance {metrics_a['meanPairwiseDistance']}."
+        f"{session_a_id} had centroid tightness {metrics_a.get('centroidTightness')} "
+        f"and mean pairwise distance {metrics_a.get('meanPairwiseDistance')}."
     )
 
     lines.append(
-        f"{session_b_id} had centroid tightness {metrics_b['centroidTightness']} "
-        f"and mean pairwise distance {metrics_b['meanPairwiseDistance']}."
+        f"{session_b_id} had centroid tightness {metrics_b.get('centroidTightness')} "
+        f"and mean pairwise distance {metrics_b.get('meanPairwiseDistance')}."
     )
 
-    if coherence_change > 0:
+    if coherence_change is None:
+        lines.append(
+            "Coherence shift could not be calculated because one or both sessions lacked valid centroid tightness."
+        )
+    elif coherence_change > 0:
         lines.append(
             f"{session_b_id} was less coherent by {coherence_change}, meaning its responses were farther from their semantic center."
         )
@@ -523,7 +534,11 @@ def evidence_based_interpretation(
     else:
         lines.append("There was no measured coherence shift.")
 
-    if pairwise_change > 0:
+    if pairwise_change is None:
+        lines.append(
+            "Homogeneity shift could not be calculated because one or both sessions lacked valid mean pairwise distance."
+        )
+    elif pairwise_change > 0:
         lines.append(
             f"{session_b_id} was less homogeneous by {pairwise_change}, meaning responses were less similar to one another overall."
         )
@@ -556,10 +571,10 @@ def evidence_based_interpretation(
     return {
         "plainLanguageInterpretation": " ".join(lines),
         "evidenceUsed": {
-            "centroidTightnessA": metrics_a["centroidTightness"],
-            "centroidTightnessB": metrics_b["centroidTightness"],
-            "meanPairwiseDistanceA": metrics_a["meanPairwiseDistance"],
-            "meanPairwiseDistanceB": metrics_b["meanPairwiseDistance"],
+            "centroidTightnessA": metrics_a.get("centroidTightness"),
+            "centroidTightnessB": metrics_b.get("centroidTightness"),
+            "meanPairwiseDistanceA": metrics_a.get("meanPairwiseDistance"),
+            "meanPairwiseDistanceB": metrics_b.get("meanPairwiseDistance"),
             "distinctiveTermsA": a_terms,
             "distinctiveTermsB": b_terms,
             "semanticHaldane": haldane
@@ -632,18 +647,20 @@ async def analyze_semantic(request: Request):
         metrics_a = session_a["metrics"]
         metrics_b = session_b["metrics"]
 
-        coherence_change = round(
-            metrics_b["centroidTightness"] - metrics_a["centroidTightness"],
-            3
+        coherence_change = safe_difference(
+            metrics_b.get("centroidTightness"),
+            metrics_a.get("centroidTightness")
         )
 
-        pairwise_change = round(
-            metrics_b["meanPairwiseDistance"] - metrics_a["meanPairwiseDistance"],
-            3
+        pairwise_change = safe_difference(
+            metrics_b.get("meanPairwiseDistance"),
+            metrics_a.get("meanPairwiseDistance")
         )
 
         coherence_direction = (
-            "more coherent"
+            "not calculable"
+            if coherence_change is None
+            else "more coherent"
             if coherence_change < 0
             else "less coherent"
             if coherence_change > 0
@@ -651,7 +668,9 @@ async def analyze_semantic(request: Request):
         )
 
         homogeneity_direction = (
-            "more homogeneous"
+            "not calculable"
+            if pairwise_change is None
+            else "more homogeneous"
             if pairwise_change < 0
             else "less homogeneous"
             if pairwise_change > 0

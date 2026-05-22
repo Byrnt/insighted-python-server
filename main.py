@@ -88,6 +88,52 @@ def safe_difference(value_b, value_a):
     return round(value_b - value_a, 3)
 
 
+def safe_round(value, digits=3):
+    if value is None:
+        return None
+
+    return round(float(value), digits)
+
+
+def vector_distance(vec_a, vec_b):
+    if vec_a is None or vec_b is None:
+        return None
+
+    return float(np.linalg.norm(vec_a - vec_b))
+
+
+def cosine_sim(vec_a, vec_b):
+    if vec_a is None or vec_b is None:
+        return None
+
+    numerator = float(np.dot(vec_a, vec_b))
+    denominator = float(np.linalg.norm(vec_a) * np.linalg.norm(vec_b))
+
+    if denominator == 0:
+        return None
+
+    return numerator / denominator
+
+
+def pooled_dispersion(spread_a, spread_b):
+    valid = [
+        value for value in [spread_a, spread_b]
+        if value is not None
+    ]
+
+    if not valid:
+        return None
+
+    return float(np.mean(valid))
+
+
+def haldane_from_delta(delta, pooled_sd):
+    if delta is None or pooled_sd is None or pooled_sd == 0:
+        return None
+
+    return float(delta / pooled_sd)
+
+
 def distinctive_terms(texts_a, texts_b, n=10):
     tokens_a = Counter()
     tokens_b = Counter()
@@ -236,20 +282,6 @@ def discover_semantic_clusters(embeddings, texts, valid, k=5):
     return clusters
 
 
-def theme_haldane_for_percentages(percentage_a, percentage_b):
-    p_a = (percentage_a or 0) / 100
-    p_b = (percentage_b or 0) / 100
-
-    pooled = np.sqrt(
-        ((p_a * (1 - p_a)) + (p_b * (1 - p_b))) / 2
-    )
-
-    if pooled == 0:
-        return None
-
-    return round(float((p_b - p_a) / pooled), 3)
-
-
 def cluster_status(percentage_a, percentage_b):
     change = percentage_b - percentage_a
 
@@ -268,7 +300,7 @@ def cluster_status(percentage_a, percentage_b):
     return "weakening"
 
 
-def discover_global_semantic_clusters(session_a, session_b, k=5):
+def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=None):
     embeddings_a = session_a["embeddings"]
     embeddings_b = session_b["embeddings"]
 
@@ -379,20 +411,55 @@ def discover_global_semantic_clusters(session_a, session_b, k=5):
 
             return candidates[:limit]
 
-        def spread_for_session(session_indices):
+        def centroid_for_session(session_indices):
             if not session_indices:
                 return None
 
             local_embeddings = combined_embeddings[session_indices]
+            return np.mean(local_embeddings, axis=0)
+
+        def spread_around_centroid(session_indices, centroid):
+            if not session_indices or centroid is None:
+                return None
+
+            local_embeddings = combined_embeddings[session_indices]
             local_distances = np.linalg.norm(
-                local_embeddings - cluster_center,
+                local_embeddings - centroid,
                 axis=1
             )
 
-            return round(float(np.mean(local_distances)), 3)
+            return float(np.mean(local_distances))
 
-        spread_a = spread_for_session(member_indices_a)
-        spread_b = spread_for_session(member_indices_b)
+        centroid_a = centroid_for_session(member_indices_a)
+        centroid_b = centroid_for_session(member_indices_b)
+
+        spread_a = spread_around_centroid(member_indices_a, centroid_a)
+        spread_b = spread_around_centroid(member_indices_b, centroid_b)
+
+        pooled_theme_sd = pooled_dispersion(spread_a, spread_b)
+
+        theme_centroid_shift = vector_distance(centroid_a, centroid_b)
+        semantic_shift_haldane = haldane_from_delta(
+            theme_centroid_shift,
+            pooled_theme_sd
+        )
+
+        goal_distance_a = vector_distance(centroid_a, goal_embedding)
+        goal_distance_b = vector_distance(centroid_b, goal_embedding)
+
+        goal_similarity_a = cosine_sim(centroid_a, goal_embedding)
+        goal_similarity_b = cosine_sim(centroid_b, goal_embedding)
+
+        goal_distance_change = safe_difference(goal_distance_b, goal_distance_a)
+
+        goal_movement_delta = None
+        if goal_distance_a is not None and goal_distance_b is not None:
+            goal_movement_delta = goal_distance_a - goal_distance_b
+
+        goal_movement_haldane = haldane_from_delta(
+            goal_movement_delta,
+            pooled_theme_sd
+        )
 
         clusters.append({
             "clusterId": int(cluster_index + 1),
@@ -402,16 +469,28 @@ def discover_global_semantic_clusters(session_a, session_b, k=5):
             "percentageB": percentage_b,
             "percentageChange": percentage_change,
             "status": cluster_status(percentage_a, percentage_b),
-            "themeHaldane": theme_haldane_for_percentages(
-                percentage_a,
-                percentage_b
-            ),
+
             "topTerms": top_terms(cluster_texts, 10),
             "representativeResponsesA": representative_for_session("A"),
             "representativeResponsesB": representative_for_session("B"),
-            "spreadA": spread_a,
-            "spreadB": spread_b,
-            "spreadChange": safe_difference(spread_b, spread_a)
+
+            "spreadA": safe_round(spread_a),
+            "spreadB": safe_round(spread_b),
+            "spreadChange": safe_difference(spread_b, spread_a),
+            "pooledThemeDispersion": safe_round(pooled_theme_sd),
+
+            "themeCentroidShift": safe_round(theme_centroid_shift),
+            "semanticShiftHaldane": safe_round(semantic_shift_haldane),
+
+            "goalDistanceA": safe_round(goal_distance_a),
+            "goalDistanceB": safe_round(goal_distance_b),
+            "goalDistanceChange": goal_distance_change,
+            "goalSimilarityA": safe_round(goal_similarity_a),
+            "goalSimilarityB": safe_round(goal_similarity_b),
+            "goalSimilarityChange": safe_difference(goal_similarity_b, goal_similarity_a),
+            "goalMovementDelta": safe_round(goal_movement_delta),
+            "goalMovementHaldane": safe_round(goal_movement_haldane),
+            "goalMovementInterpretation": interpret_goal_movement_haldane(goal_movement_haldane)
         })
 
     clusters.sort(
@@ -420,6 +499,26 @@ def discover_global_semantic_clusters(session_a, session_b, k=5):
     )
 
     return clusters
+
+
+def interpret_goal_movement_haldane(value):
+    if value is None:
+        return "Goal movement could not be calculated for this region."
+
+    if value >= 1.0:
+        return "Major movement toward the declared goal."
+    if value >= 0.5:
+        return "Moderate movement toward the declared goal."
+    if value >= 0.2:
+        return "Small movement toward the declared goal."
+    if value > -0.2:
+        return "Little or no movement relative to the declared goal."
+    if value > -0.5:
+        return "Small movement away from the declared goal."
+    if value > -1.0:
+        return "Moderate movement away from the declared goal."
+
+    return "Major movement away from the declared goal."
 
 
 def compute_embeddings_and_metrics(responses):
@@ -560,14 +659,13 @@ def semantic_haldane(centroid_a, centroid_b, metrics_a, metrics_b):
             "interpretation": "Semantic Haldane cannot be calculated without dispersion values."
         }
 
-    pooled_dispersion = (dispersion_a + dispersion_b) / 2
-
+    pooled = (dispersion_a + dispersion_b) / 2
     centroid_shift = float(np.linalg.norm(centroid_b - centroid_a))
 
-    if pooled_dispersion == 0:
+    if pooled == 0:
         value = None
     else:
-        value = centroid_shift / pooled_dispersion
+        value = centroid_shift / pooled
 
     if value is None:
         interpretation = "Semantic Haldane cannot be interpreted because pooled dispersion is zero."
@@ -581,7 +679,7 @@ def semantic_haldane(centroid_a, centroid_b, metrics_a, metrics_b):
     return {
         "value": round(value, 3) if value is not None else None,
         "centroidShift": round(centroid_shift, 3),
-        "pooledSemanticDispersion": round(pooled_dispersion, 3),
+        "pooledSemanticDispersion": round(pooled, 3),
         "formula": "semanticHaldane = centroidShift / pooledSemanticDispersion",
         "interpretation": interpretation,
         "caution": (
@@ -772,6 +870,36 @@ def evidence_based_interpretation(
     }
 
 
+def extract_declared_goal(payload, set_a=None, set_b=None, responses_a=None, responses_b=None):
+    direct_goal = (
+        payload.get("declaredGoal")
+        or payload.get("sessionGoal")
+        or payload.get("sessionFocus")
+        or payload.get("focusConcept")
+    )
+
+    if direct_goal:
+        return str(direct_goal).strip()
+
+    for source in [set_b or {}, set_a or {}]:
+        possible = (
+            source.get("declaredGoal")
+            or source.get("sessionGoal")
+            or source.get("sessionFocus")
+            or source.get("focusConcept")
+        )
+
+        if possible:
+            return str(possible).strip()
+
+    for response_list in [responses_b or [], responses_a or []]:
+        for response in response_list:
+            if response.focusConcept and response.focusConcept.strip():
+                return response.focusConcept.strip()
+
+    return ""
+
+
 @app.get("/")
 def root():
     return {
@@ -794,10 +922,16 @@ async def analyze_semantic(request: Request):
         session = compute_embeddings_and_metrics(responses)
         metrics = session["metrics"]
 
+        declared_goal = extract_declared_goal(
+            payload,
+            responses_a=responses
+        )
+
         return {
             "success": True,
             "analysisType": "single_session",
             "sessionId": payload.get("sessionId"),
+            "declaredGoal": declared_goal,
             "responseCount": metrics["responseCount"],
             "summary": (
                 f"Analyzed {metrics['responseCount']} responses "
@@ -823,6 +957,18 @@ async def analyze_semantic(request: Request):
             ResponseItem(**r)
             for r in set_b.get("responses", [])
         ]
+
+        declared_goal = extract_declared_goal(
+            payload,
+            set_a=set_a,
+            set_b=set_b,
+            responses_a=responses_a,
+            responses_b=responses_b
+        )
+
+        goal_embedding = None
+        if declared_goal:
+            goal_embedding = model.encode([declared_goal])[0]
 
         session_a = compute_embeddings_and_metrics(responses_a)
         session_b = compute_embeddings_and_metrics(responses_b)
@@ -888,12 +1034,14 @@ async def analyze_semantic(request: Request):
         global_semantic_clusters = discover_global_semantic_clusters(
             session_a,
             session_b,
-            k=5
+            k=5,
+            goal_embedding=goal_embedding
         )
 
         return {
             "success": True,
             "analysisType": "session_comparison",
+            "declaredGoal": declared_goal,
             "summary": (
                 f"Compared Session {set_a.get('sessionId')} "
                 f"to Session {set_b.get('sessionId')}. "
@@ -904,6 +1052,7 @@ async def analyze_semantic(request: Request):
                 f"Semantic Haldane: {haldane.get('value')}."
             ),
             "comparison": {
+                "declaredGoal": declared_goal,
                 "sessionA": {
                     "sessionId": set_a.get("sessionId"),
                     "metrics": metrics_a

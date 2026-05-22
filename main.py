@@ -134,6 +134,36 @@ def haldane_from_delta(delta, pooled_sd):
     return float(delta / pooled_sd)
 
 
+def interpret_goal_alignment(similarity_b, similarity_change):
+    if similarity_b is None:
+        return "Goal alignment could not be calculated for this region."
+
+    if similarity_b >= 0.70:
+        alignment = "high alignment"
+    elif similarity_b >= 0.50:
+        alignment = "moderate alignment"
+    elif similarity_b >= 0.25:
+        alignment = "low alignment"
+    else:
+        alignment = "very low alignment"
+
+    if similarity_change is None:
+        return f"Current alignment is {alignment}. No before/after similarity change could be calculated."
+
+    if similarity_change >= 0.10:
+        movement = "Similarity to the declared goal increased meaningfully."
+    elif similarity_change >= 0.03:
+        movement = "Similarity to the declared goal increased slightly."
+    elif similarity_change <= -0.10:
+        movement = "Similarity to the declared goal decreased meaningfully."
+    elif similarity_change <= -0.03:
+        movement = "Similarity to the declared goal decreased slightly."
+    else:
+        movement = "Similarity to the declared goal changed little."
+
+    return f"Current alignment is {alignment}. {movement}"
+
+
 def distinctive_terms(texts_a, texts_b, n=10):
     tokens_a = Counter()
     tokens_b = Counter()
@@ -449,17 +479,9 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
 
         goal_similarity_a = cosine_sim(centroid_a, goal_embedding)
         goal_similarity_b = cosine_sim(centroid_b, goal_embedding)
+        goal_similarity_change = safe_difference(goal_similarity_b, goal_similarity_a)
 
         goal_distance_change = safe_difference(goal_distance_b, goal_distance_a)
-
-        goal_movement_delta = None
-        if goal_distance_a is not None and goal_distance_b is not None:
-            goal_movement_delta = goal_distance_a - goal_distance_b
-
-        goal_movement_haldane = haldane_from_delta(
-            goal_movement_delta,
-            pooled_theme_sd
-        )
 
         clusters.append({
             "clusterId": int(cluster_index + 1),
@@ -480,6 +502,7 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
             "pooledThemeDispersion": safe_round(pooled_theme_sd),
 
             "themeCentroidShift": safe_round(theme_centroid_shift),
+            "themeHaldane": safe_round(semantic_shift_haldane),
             "semanticShiftHaldane": safe_round(semantic_shift_haldane),
 
             "goalDistanceA": safe_round(goal_distance_a),
@@ -487,10 +510,11 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
             "goalDistanceChange": goal_distance_change,
             "goalSimilarityA": safe_round(goal_similarity_a),
             "goalSimilarityB": safe_round(goal_similarity_b),
-            "goalSimilarityChange": safe_difference(goal_similarity_b, goal_similarity_a),
-            "goalMovementDelta": safe_round(goal_movement_delta),
-            "goalMovementHaldane": safe_round(goal_movement_haldane),
-            "goalMovementInterpretation": interpret_goal_movement_haldane(goal_movement_haldane)
+            "goalSimilarityChange": goal_similarity_change,
+            "goalAlignmentInterpretation": interpret_goal_alignment(
+                goal_similarity_b,
+                goal_similarity_change
+            )
         })
 
     clusters.sort(
@@ -499,26 +523,6 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
     )
 
     return clusters
-
-
-def interpret_goal_movement_haldane(value):
-    if value is None:
-        return "Goal movement could not be calculated for this region."
-
-    if value >= 1.0:
-        return "Major movement toward the declared goal."
-    if value >= 0.5:
-        return "Moderate movement toward the declared goal."
-    if value >= 0.2:
-        return "Small movement toward the declared goal."
-    if value > -0.2:
-        return "Little or no movement relative to the declared goal."
-    if value > -0.5:
-        return "Small movement away from the declared goal."
-    if value > -1.0:
-        return "Moderate movement away from the declared goal."
-
-    return "Major movement away from the declared goal."
 
 
 def compute_embeddings_and_metrics(responses):

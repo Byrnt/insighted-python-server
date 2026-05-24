@@ -134,21 +134,32 @@ def haldane_from_delta(delta, pooled_sd):
     return float(delta / pooled_sd)
 
 
-def interpret_goal_alignment(similarity_b, similarity_change):
+def interpret_goal_alignment(similarity_b, similarity_change, relative_alignment=None, rank=None, total=None):
     if similarity_b is None:
         return "Goal alignment could not be calculated for this region."
 
     if similarity_b >= 0.70:
-        alignment = "high alignment"
+        alignment = "high absolute alignment"
     elif similarity_b >= 0.50:
-        alignment = "moderate alignment"
+        alignment = "moderate absolute alignment"
     elif similarity_b >= 0.25:
-        alignment = "low alignment"
+        alignment = "modest absolute alignment"
     else:
-        alignment = "very low alignment"
+        alignment = "very low absolute alignment"
+
+    relative_text = ""
+    if relative_alignment and rank is not None and total is not None:
+        relative_text = (
+            f" Relative to the detected themes in this dataset, this region is the "
+            f"{relative_alignment} (rank {rank} of {total})."
+        )
 
     if similarity_change is None:
-        return f"Current alignment is {alignment}. No before/after similarity change could be calculated."
+        return (
+            f"Current alignment is {alignment}."
+            f"{relative_text} "
+            "No before/after similarity change could be calculated."
+        )
 
     if similarity_change >= 0.10:
         movement = "Similarity to the declared goal increased meaningfully."
@@ -161,7 +172,57 @@ def interpret_goal_alignment(similarity_b, similarity_change):
     else:
         movement = "Similarity to the declared goal changed little."
 
-    return f"Current alignment is {alignment}. {movement}"
+    return f"Current alignment is {alignment}.{relative_text} {movement}"
+
+
+def annotate_relative_goal_alignment(clusters):
+    valid_clusters = [
+        cluster for cluster in clusters
+        if cluster.get("goalSimilarityB") is not None
+    ]
+
+    if not valid_clusters:
+        return clusters
+
+    ranked = sorted(
+        valid_clusters,
+        key=lambda cluster: cluster.get("goalSimilarityB", -999),
+        reverse=True
+    )
+
+    total = len(ranked)
+
+    for index, cluster in enumerate(ranked):
+        rank = index + 1
+
+        if total == 1:
+            percentile = 100
+        else:
+            percentile = round(100 * (1 - (index / (total - 1))), 1)
+
+        if rank == 1:
+            relative = "strongest detected alignment"
+        elif rank == 2:
+            relative = "second strongest detected alignment"
+        elif rank <= max(2, int(np.ceil(total / 2))):
+            relative = "moderate detected alignment"
+        else:
+            relative = "weak detected alignment"
+
+        cluster["goalAlignmentRank"] = rank
+        cluster["goalAlignmentTotal"] = total
+        cluster["goalAlignmentPercentile"] = percentile
+        cluster["relativeGoalAlignment"] = relative
+
+        cluster["goalAlignmentInterpretation"] = interpret_goal_alignment(
+            cluster.get("goalSimilarityB"),
+            cluster.get("goalSimilarityChange"),
+            relative_alignment=relative,
+            rank=rank,
+            total=total
+        )
+
+    return clusters
 
 
 def distinctive_terms(texts_a, texts_b, n=10):
@@ -483,8 +544,6 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
 
         goal_distance_change = safe_difference(goal_distance_b, goal_distance_a)
 
-        # Additional terrain signals for visualization and interpretation.
-        # These do not replace goalSimilarityChange; they expose different phenomena.
         prevalence_change_normalized = safe_round(
             (percentage_b - percentage_a) / 100.0
         )
@@ -503,14 +562,11 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
 
         resistance_score = None
         if goal_similarity_a is not None and goal_similarity_b is not None:
-            # Positive = movement away from the declared goal, weighted by region prevalence.
-            # Negative = movement toward the declared goal, weighted by region prevalence.
             prevalence_weight = (percentage_a + percentage_b) / 200.0
             resistance_score = -(goal_similarity_change or 0) * prevalence_weight
 
         entrenchment_score = None
         if goal_similarity_b is not None:
-            # High when a region is prevalent, persistent, and still far from the declared goal.
             persistence_component = min(percentage_a, percentage_b) / 100.0
             distance_from_goal_component = max(0.0, 1.0 - ((goal_similarity_b + 1.0) / 2.0))
             entrenchment_score = persistence_component * distance_from_goal_component
@@ -562,11 +618,17 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
             "entrenchmentScore": safe_round(entrenchment_score),
             "terrainSignals": terrain_signals,
 
+            "goalAlignmentRank": None,
+            "goalAlignmentTotal": None,
+            "goalAlignmentPercentile": None,
+            "relativeGoalAlignment": None,
             "goalAlignmentInterpretation": interpret_goal_alignment(
                 goal_similarity_b,
                 goal_similarity_change
             )
         })
+
+    clusters = annotate_relative_goal_alignment(clusters)
 
     clusters.sort(
         key=lambda c: abs(c["percentageChange"]),
@@ -925,6 +987,301 @@ def evidence_based_interpretation(
     }
 
 
+
+def suggest_theme_name_from_terms(cluster):
+    terms = [
+        str(item.get("term", "")).lower()
+        for item in cluster.get("topTerms", [])
+        if item.get("term")
+    ]
+
+    term_set = set(terms)
+
+    theme_rules = [
+        (
+            "Community Support",
+            {"support", "help", "helping", "others", "together", "everyone", "belong", "included", "include", "care"}
+        ),
+        (
+            "Shared Responsibility",
+            {"responsibility", "responsible", "part", "participate", "participation", "contribute", "contributing", "rules", "order", "together"}
+        ),
+        (
+            "Collective Learning",
+            {"learn", "learning", "together", "understand", "growth", "practice", "students", "class"}
+        ),
+        (
+            "Belonging and Inclusion",
+            {"belonging", "belong", "include", "included", "everyone", "safe", "welcome", "connected"}
+        ),
+        (
+            "Leadership and Direction",
+            {"leader", "leadership", "goal", "goals", "direction", "mission", "vision", "guide"}
+        ),
+        (
+            "Process and Structure",
+            {"process", "system", "structure", "order", "rules", "organized", "expectations", "clear"}
+        )
+    ]
+
+    best_theme = None
+    best_score = 0
+
+    for theme_name, keywords in theme_rules:
+        score = len(term_set.intersection(keywords))
+        if score > best_score:
+            best_theme = theme_name
+            best_score = score
+
+    if best_theme:
+        return best_theme
+
+    if len(terms) >= 2:
+        return f"{terms[0].title()} / {terms[1].title()}"
+
+    if len(terms) == 1:
+        return terms[0].title()
+
+    return "Detected Theme"
+
+
+def summarize_top_terms(cluster, limit=5):
+    terms = [
+        str(item.get("term", "")).strip()
+        for item in cluster.get("topTerms", [])[:limit]
+        if item.get("term")
+    ]
+
+    return ", ".join(terms)
+
+
+def strongest_goal_clusters(clusters, limit=2):
+    valid_clusters = [
+        cluster for cluster in clusters
+        if cluster.get("goalSimilarityB") is not None
+    ]
+
+    return sorted(
+        valid_clusters,
+        key=lambda cluster: cluster.get("goalSimilarityB", -999),
+        reverse=True
+    )[:limit]
+
+
+def classify_primary_outcome(changes, clusters):
+    coherence_change = changes.get("coherence", {}).get("rawChange")
+    homogeneity_change = changes.get("homogeneity", {}).get("rawChange")
+    haldane_value = changes.get("semanticHaldane", {}).get("value")
+
+    goal_clusters = strongest_goal_clusters(clusters, limit=2)
+    strongest_goal_similarity = None
+    strongest_goal_change = None
+
+    if goal_clusters:
+        strongest_goal_similarity = goal_clusters[0].get("goalSimilarityB")
+        strongest_goal_change = goal_clusters[0].get("goalSimilarityChange")
+
+    if coherence_change is None or homogeneity_change is None:
+        return "Minimal Change"
+
+    small_global_change = (
+        abs(coherence_change) < 0.03
+        and abs(homogeneity_change) < 0.03
+        and (haldane_value is None or haldane_value < 0.2)
+    )
+
+    if small_global_change:
+        if strongest_goal_similarity is not None and strongest_goal_similarity >= 0.45:
+            return "Goal Convergence"
+        return "Minimal Change"
+
+    if strongest_goal_similarity is not None and strongest_goal_similarity >= 0.45:
+        if strongest_goal_change is not None and strongest_goal_change >= 0.03:
+            return "Goal Convergence"
+
+        if coherence_change > 0 and homogeneity_change > 0:
+            return "Differentiation"
+
+        if coherence_change < 0 or homogeneity_change < 0:
+            return "Consolidation"
+
+    if coherence_change > 0 and homogeneity_change > 0:
+        return "Fragmentation"
+
+    if coherence_change < 0 and homogeneity_change < 0:
+        return "Consolidation"
+
+    return "Differentiation"
+
+
+def estimate_confidence(metrics_a, metrics_b, clusters):
+    count_a = metrics_a.get("responseCount", 0) or 0
+    count_b = metrics_b.get("responseCount", 0) or 0
+
+    if count_a < 3 or count_b < 3:
+        return "Low"
+
+    if count_a < 8 or count_b < 8:
+        return "Moderate"
+
+    goal_clusters = strongest_goal_clusters(clusters, limit=1)
+    has_goal_signal = bool(goal_clusters and goal_clusters[0].get("goalSimilarityB") is not None)
+
+    if count_a >= 12 and count_b >= 12 and has_goal_signal:
+        return "High"
+
+    return "Moderate"
+
+
+def build_client_executive_summary(
+    declared_goal,
+    session_a_id,
+    session_b_id,
+    metrics_a,
+    metrics_b,
+    changes,
+    clusters,
+    term_comparison,
+    haldane
+):
+    primary_outcome = classify_primary_outcome(changes, clusters)
+    confidence = estimate_confidence(metrics_a, metrics_b, clusters)
+
+    goal_clusters = strongest_goal_clusters(clusters, limit=2)
+    lead_cluster = goal_clusters[0] if goal_clusters else (clusters[0] if clusters else {})
+
+    theme_name = suggest_theme_name_from_terms(lead_cluster) if lead_cluster else "Detected Themes"
+    top_terms_text = summarize_top_terms(lead_cluster, limit=5) if lead_cluster else ""
+
+    coherence = changes.get("coherence", {})
+    homogeneity = changes.get("homogeneity", {})
+
+    coherence_direction = coherence.get("direction", "not calculable")
+    homogeneity_direction = homogeneity.get("direction", "not calculable")
+    coherence_change = coherence.get("rawChange")
+    homogeneity_change = homogeneity.get("rawChange")
+
+    distinctive_b = term_comparison.get("moreCharacteristicOfB", [])[:5]
+    distinctive_a = term_comparison.get("moreCharacteristicOfA", [])[:5]
+
+    distinctive_b_terms = ", ".join([
+        item.get("term", "") for item in distinctive_b if item.get("term")
+    ])
+
+    headline_theme = theme_name
+    if primary_outcome in ["Differentiation", "Consolidation", "Goal Convergence"]:
+        headline = f"{primary_outcome} Around {headline_theme}"
+    else:
+        headline = primary_outcome
+
+    if primary_outcome == "Differentiation":
+        summary_text = (
+            f"Participants moved toward more varied language around {top_terms_text or 'the detected themes'}. "
+            f"Overall coherence was {coherence_direction} and overall homogeneity was {homogeneity_direction}. "
+            "Because the strongest goal-aligned regions remained connected to the declared training goal, "
+            "this pattern is best read as conceptual differentiation rather than simple fragmentation."
+        )
+    elif primary_outcome == "Consolidation":
+        summary_text = (
+            f"Participants moved toward a more shared language pattern around {top_terms_text or 'the detected themes'}. "
+            f"Overall coherence was {coherence_direction} and overall homogeneity was {homogeneity_direction}, "
+            "suggesting that responses became more anchored around common concepts."
+        )
+    elif primary_outcome == "Goal Convergence":
+        summary_text = (
+            f"Participants' language showed stronger alignment with the declared goal"
+            f"{f' ({declared_goal})' if declared_goal else ''}. "
+            f"The strongest aligned theme was {theme_name}, with terms such as {top_terms_text or 'the top detected terms'}."
+        )
+    elif primary_outcome == "Fragmentation":
+        summary_text = (
+            f"Participants' language became more dispersed across the semantic field. "
+            f"Overall coherence was {coherence_direction} and homogeneity was {homogeneity_direction}. "
+            "The current pattern should be interpreted cautiously because it may indicate multiple competing interpretations rather than a single shared movement."
+        )
+    else:
+        summary_text = (
+            "The comparison shows limited overall movement between sessions. "
+            "Any detected differences should be treated as early signals rather than strong evidence of a changed shared understanding."
+        )
+
+    key_findings = []
+
+    key_findings.append(
+        f"Coherence was {coherence_direction} from {session_a_id} to {session_b_id}"
+        f"{f' ({coherence_change})' if coherence_change is not None else ''}."
+    )
+
+    key_findings.append(
+        f"Homogeneity was {homogeneity_direction} from {session_a_id} to {session_b_id}"
+        f"{f' ({homogeneity_change})' if homogeneity_change is not None else ''}."
+    )
+
+    if haldane.get("value") is not None:
+        key_findings.append(
+            f"Semantic Haldane was {haldane.get('value')}, indicating {haldane.get('interpretation', 'measured semantic movement').lower()}"
+        )
+
+    if distinctive_b_terms:
+        key_findings.append(
+            f"Terms more characteristic of {session_b_id} included: {distinctive_b_terms}."
+        )
+
+    if goal_clusters:
+        cluster_findings = []
+        for cluster in goal_clusters:
+            cluster_findings.append({
+                "clusterId": cluster.get("clusterId"),
+                "themeName": suggest_theme_name_from_terms(cluster),
+                "topTerms": summarize_top_terms(cluster, limit=5),
+                "goalSimilarityB": cluster.get("goalSimilarityB"),
+                "goalSimilarityChange": cluster.get("goalSimilarityChange"),
+                "percentageB": cluster.get("percentageB"),
+                "status": cluster.get("status")
+            })
+    else:
+        cluster_findings = []
+
+    evidence = {
+        "sessionA": {
+            "sessionId": session_a_id,
+            "responseCount": metrics_a.get("responseCount"),
+            "centroidTightness": metrics_a.get("centroidTightness"),
+            "meanPairwiseDistance": metrics_a.get("meanPairwiseDistance")
+        },
+        "sessionB": {
+            "sessionId": session_b_id,
+            "responseCount": metrics_b.get("responseCount"),
+            "centroidTightness": metrics_b.get("centroidTightness"),
+            "meanPairwiseDistance": metrics_b.get("meanPairwiseDistance")
+        },
+        "changes": changes,
+        "semanticHaldane": haldane,
+        "goalAlignedClusters": cluster_findings,
+        "distinctiveTermsA": distinctive_a,
+        "distinctiveTermsB": distinctive_b
+    }
+
+    client_caution = (
+        "This summary is an interpretive reporting layer based on semantic patterns in written responses. "
+        "It should be read as evidence of language movement, not as direct proof of internal belief, motivation, or organizational reality."
+    )
+
+    if confidence == "Low":
+        client_caution += " Confidence is low because one or both sessions have very small sample sizes."
+    elif confidence == "Moderate":
+        client_caution += " Confidence is moderate; the pattern is useful, but should be confirmed with additional responses or follow-up evidence."
+
+    return {
+        "headline": headline,
+        "primaryOutcome": primary_outcome,
+        "summaryText": summary_text,
+        "keyFindings": key_findings,
+        "evidence": evidence,
+        "confidence": confidence,
+        "clientCaution": client_caution
+    }
+
 def extract_declared_goal(payload, set_a=None, set_b=None, responses_a=None, responses_b=None):
     direct_goal = (
         payload.get("declaredGoal")
@@ -1093,6 +1450,28 @@ async def analyze_semantic(request: Request):
             goal_embedding=goal_embedding
         )
 
+        client_executive_summary = build_client_executive_summary(
+            declared_goal,
+            set_a.get("sessionId"),
+            set_b.get("sessionId"),
+            metrics_a,
+            metrics_b,
+            {
+                "coherence": {
+                    "rawChange": coherence_change,
+                    "direction": coherence_direction
+                },
+                "homogeneity": {
+                    "rawChange": pairwise_change,
+                    "direction": homogeneity_direction
+                },
+                "semanticHaldane": haldane
+            },
+            global_semantic_clusters,
+            term_comparison,
+            haldane
+        )
+
         return {
             "success": True,
             "analysisType": "session_comparison",
@@ -1106,6 +1485,7 @@ async def analyze_semantic(request: Request):
                 f"({homogeneity_direction}). "
                 f"Semantic Haldane: {haldane.get('value')}."
             ),
+            "clientExecutiveSummary": client_executive_summary,
             "comparison": {
                 "declaredGoal": declared_goal,
                 "sessionA": {
@@ -1130,6 +1510,7 @@ async def analyze_semantic(request: Request):
                     "semanticHaldane": haldane
                 },
                 "distinctiveTerms": term_comparison,
+                "clientExecutiveSummary": client_executive_summary,
                 "globalSemanticClusters": global_semantic_clusters,
                 "embeddingMap": embedding_map(session_a, session_b),
                 "evidenceBasedInterpretation": interpretation,

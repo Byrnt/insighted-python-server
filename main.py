@@ -483,6 +483,48 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
 
         goal_distance_change = safe_difference(goal_distance_b, goal_distance_a)
 
+        # Additional terrain signals for visualization and interpretation.
+        # These do not replace goalSimilarityChange; they expose different phenomena.
+        prevalence_change_normalized = safe_round(
+            (percentage_b - percentage_a) / 100.0
+        )
+
+        persistence_score = safe_round(
+            min(percentage_a, percentage_b) / 100.0
+        )
+
+        novelty_score = 0.0
+        if response_count_a == 0 and response_count_b > 0:
+            novelty_score = percentage_b / 100.0
+
+        disappearance_score = 0.0
+        if response_count_a > 0 and response_count_b == 0:
+            disappearance_score = percentage_a / 100.0
+
+        resistance_score = None
+        if goal_similarity_a is not None and goal_similarity_b is not None:
+            # Positive = movement away from the declared goal, weighted by region prevalence.
+            # Negative = movement toward the declared goal, weighted by region prevalence.
+            prevalence_weight = (percentage_a + percentage_b) / 200.0
+            resistance_score = -(goal_similarity_change or 0) * prevalence_weight
+
+        entrenchment_score = None
+        if goal_similarity_b is not None:
+            # High when a region is prevalent, persistent, and still far from the declared goal.
+            persistence_component = min(percentage_a, percentage_b) / 100.0
+            distance_from_goal_component = max(0.0, 1.0 - ((goal_similarity_b + 1.0) / 2.0))
+            entrenchment_score = persistence_component * distance_from_goal_component
+
+        terrain_signals = {
+            "goalAlignment": goal_similarity_change,
+            "prevalenceChange": prevalence_change_normalized,
+            "resistance": safe_round(resistance_score),
+            "novelty": safe_round(novelty_score),
+            "disappearance": safe_round(disappearance_score),
+            "persistence": persistence_score,
+            "entrenchment": safe_round(entrenchment_score)
+        }
+
         clusters.append({
             "clusterId": int(cluster_index + 1),
             "responseCountA": response_count_a,
@@ -490,6 +532,7 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
             "responseCountB": response_count_b,
             "percentageB": percentage_b,
             "percentageChange": percentage_change,
+            "prevalenceChange": prevalence_change_normalized,
             "status": cluster_status(percentage_a, percentage_b),
 
             "topTerms": top_terms(cluster_texts, 10),
@@ -511,6 +554,14 @@ def discover_global_semantic_clusters(session_a, session_b, k=5, goal_embedding=
             "goalSimilarityA": safe_round(goal_similarity_a),
             "goalSimilarityB": safe_round(goal_similarity_b),
             "goalSimilarityChange": goal_similarity_change,
+
+            "resistanceScore": safe_round(resistance_score),
+            "noveltyScore": safe_round(novelty_score),
+            "disappearanceScore": safe_round(disappearance_score),
+            "persistenceScore": persistence_score,
+            "entrenchmentScore": safe_round(entrenchment_score),
+            "terrainSignals": terrain_signals,
+
             "goalAlignmentInterpretation": interpret_goal_alignment(
                 goal_similarity_b,
                 goal_similarity_change
